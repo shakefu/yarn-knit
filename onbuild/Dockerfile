@@ -1,4 +1,4 @@
-FROM shakefu/yarn-knit:latest
+FROM shakefu/yarn-knit:base
 
 ONBUILD COPY \
     package.json \
