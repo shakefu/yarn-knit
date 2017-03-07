@@ -7,8 +7,8 @@ set -e
 KNIT_REPO=${KNIT_REPO:-shakefu}
 
 # Build the base image
-docker built -t "$KNIT_REPO/yarn-knit:base" -f base/Dockerfile base/
+docker build -t "$KNIT_REPO/yarn-knit:base" -f base/Dockerfile base/
 
 # Build the onbuild image
-docker built -t "$KNIT_REPO/yarn-knit:onbuild" -f onbuild/Dockerfile onbuild/
+docker build -t "$KNIT_REPO/yarn-knit:onbuild" -f onbuild/Dockerfile onbuild/
 
