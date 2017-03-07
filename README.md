@@ -1,2 +1,4 @@
 # yarn-knit
-Fast and small docker images for node based on yarn
+
+Fast and minimal docker images for node based on yarn.
+
