@@ -1,13 +1,245 @@
 #!/bin/bash
 
+##################
+# Environment vars
+
+# Show debug output
+# TODO: Toggle to false
+KNIT_DEBUG=${KNIT_DEBUG:-true}
+
+# Docker Hub repo name
+KNIT_REPO=${KNIT_REPO:-shakefu}
+
+# Script information
+KNIT_SCRIPT=$(which knit)
+KNIT_DIR=$(dirname "$KNIT_SCRIPT")
+KNIT_CACHE_DIR=''
+KNIT_BUILD_DIR=''
+KNIT_BUILD_NAME=''
+
+# File names
+KNIT_BASE=".knit"
+KNIT_DOCKERFILE="$KNIT_BASE/Dockerfile"
+KNIT_CACHED="$KNIT_DOCKERFILE-cached"
+KNIT_NPMRC="$HOME/.npmrc"
+
+
+##############
+# Sub-commands
+##############
+
+_build () {
+    # Set our build globals
+    KNIT_CACHE_DIR=$(yarn_cache_dir)
+    KNIT_BUILD_NAME=$(basename "$KNIT_BUILD_DIR")
+    KNIT_BUILD_NAME=${1:-$KNIT_BUILD_NAME}
+
+    info "Building $KNIT_BUILD_NAME ..."
+
+    _setup
+
+    info "Checking for cached images"
+    local cache_image
+    local cache_sha
+    cache_image=$(image_base)
+    cache_sha=$(docker build -q -t "$cache_image" -f "$KNIT_CACHED" .)
+
+    local cached_prod
+    local cached_dev
+    cached_prod=$(docker images -q --filter=label="knit.base=$cache_sha" \
+        --filter=label="knit.build=production" \
+        --filter=label="knit.stage=installed")
+    cached_dev=$(docker images -q --filter=label="knit.base=$cache_sha" \
+        --filter=label="knit.build=development" \
+        --filter=label="knit.stage=installed")
+
+    # If we have a cached image, then use that and just update the files
+    if [[ -n "$cached_prod" && "$cached_dev" ]]; then
+        info "Updating images from cache"
+        _update_files "$cached_prod"
+        _update_files "$cached_dev"
+
+        # TODO: Post-update stuff
+
+        exit 0
+    fi
+
+    debug "Using yarn cache from $KNIT_CACHE_DIR"
+
+    docker run \
+        --name "$(build_container)" \
+        -v "$KNIT_SCRIPT:/usr/local/bin/knit" \
+        -v "$KNIT_CACHE_DIR:/root/.cache/yarn" \
+        -v "$KNIT_NPMRC:/root/.npmrc" \
+        "$cache_image" knit wait
+
+    _cleanup
+
+    exit 0
+}
+
+
+###################
+# Indirect commands
+###################
+
+_setup () {
+    # TODO: Test for being in the build dir?
+    debug "Making $KNIT_BASE directory"
+    mkdir -p "$KNIT_BASE"
+
+    # TODO: Move this dockerfile somewhere better
+    debug "Copying yarn-knit Dockerfiles"
+    cp "$KNIT_DIR/Dockerfile" "$KNIT_CACHED"
+
+    debug "Checking for .npmrc at $KNIT_NPMRC"
+    if [[ ! -f "$KNIT_NPMRC" ]]; then
+        error "Cannot find .npmrc at $KNIT_NPMRC"
+    fi
+}
+
+_update_files () {
+    local cached_sha=${1:-}
+    info "Updating files for $cached_sha"
+}
+
+_cleanup () {
+    debug "Cleaning up $KNIT_BASE"
+    rm "$KNIT_CACHED"
+    rmdir "$KNIT_BASE"
+}
+
+
+#################
+# Main entrypoint
+#################
+
+
+main () {
+    info "Knitting..."
+
+    # Set our global script references
+    KNIT_DIR=$(resolve_symlink "$0")
+    KNIT_SCRIPT="$KNIT_DIR/$(basename "$0")"
+    KNIT_BUILD_DIR=$(pwd)
+    debug "KNIT_DIR=$KNIT_DIR"
+    debug "KNIT_SCRIPT=$KNIT_SCRIPT"
+    debug "KNIT_BUILD_DIR=$KNIT_BUILD_DIR"
+
+    case "$1" in
+        wait)
+            shift
+            sleep 10000
+            ;;
+        build)
+            shift
+            _build "$@"
+            ;;
+        *)
+            _build "$@"
+            ;;
+    esac
+
+    exit 0
+}
+
+
+###################
+# Library functions
+###################
+
+yarn_cache_dir () {
+    local dir
+    dir=$(yarn cache dir || echo '/tmp/yarn')
+
+    if [[ ! -d "$dir" ]]; then
+        mkdir -p "$dir" || error "Could not create yarn cache directory"
+    fi
+
+    echo "$dir"
+}
+
+build_container () {
+    echo "knit_$KNIT_BUILD_NAME"
+}
+
+image_base () {
+    echo "$KNIT_BUILD_NAME:knit.base"
+}
+
+resolve_symlink () {
+    local script
+    local newscript
+
+    script=${1:-}
+    newscript=''
+
+    until [ "$script" = "$newscript" ]; do
+        if [ "${script:0:1}" = '.' ]; then script="$PWD/$script"; fi
+        cd "$(dirname "$script")" || error "Could not resolve symlinks."
+        if [ ! "${script:0:1}" = '.' ]; then script=$(basename "$script"); fi
+        script="${newscript:=$script}"
+        # shellcheck disable=SC2012
+        newscript=$(ls -l $script | awk '{ print $NF }')
+    done    
+    if [ ! "${script:0:1}" = '/' ]; then script=$PWD/$script; fi    
+
+    # shellcheck disable=SC2005
+    echo "$(dirname "$script")"
+}
+
+##################
+# Output functions
+##################
+
+info () {
+    blue "[INFO] "
+    echo "$*"
+}
+
+
+error () {
+    red "[ERROR] "
+    echo "$*"
+    exit 1
+}
+
+
+debug () {
+    if [[ -z "$KNIT_DEBUG" ]]; then return; fi
+    cyan "[DEBUG] "
+    echo "$*"
+}
+
+# Colors
+red () { printf "\033[1;31m%s\033[0m" "$*"; }
+pink () { printf "\033[1;35m%s\033[0m" "$*"; }
+blue () { printf "\033[1;34m%s\033[0m" "$*"; }
+green () { printf "\033[1;32m%s\033[0m" "$*"; }
+drk_green () { printf "\033[0;32m%s\033[0m" "$*"; }
+cyan () { printf "\033[0;36m%s\033[0m" "$*"; }
+
+
+################
+# Run the script
+################
+
+main "$@"
+
+
+####################
+# Kept for reference
+
+
 BASE_IMAGE="build_node"
+
 
 main () {
     local build_path
     local build_script
     build_path=${1:-.}
 
-    pushd $(dirname $0) > /dev/null
+    pushd "$(dirname "$0")" > /dev/null
     build_script=$(pwd -P)/$0
     popd > /dev/null
 
@@ -17,14 +249,14 @@ main () {
 
     if [ -n "$1" ]; then echo "Too many arguments."; exit 1; fi
 
-    cd $build_path
-    echo "$(pwd)"
+    cd "$build_path" || exit
+    # echo "$(pwd)"
 
     # TODO: Make sure $HOME/.npmrc exists
 
     # TODO: Compose a more sane build name
     local build_name
-    build_name="build_$(basename $(pwd))"  # TODO: Fix this
+    build_name="build_$(tbasename "$(pwd)")"  # TODO: Fix this
 
     # TODO: Make this flexible depending on presence of yarn command
     # TODO: Make sure target cache dir exists
@@ -40,38 +272,38 @@ main () {
 
     # Step one, do a --production install
     docker run \
-        --name $build_name \
+        --name "$build_name" \
         -v "$(pwd):/usr/local/src/app/" \
         -v "$build_script:/usr/local/bin/build.sh" \
         -v "$cache_dir:/root/.cache/yarn" \
         -v "$HOME/.npmrc:/root/.npmrc" \
-        $BASE_IMAGE build.sh --production
+        "$BASE_IMAGE" build.sh --production
 
     # Commit the production container
-    docker commit $build_name $build_name
+    docker commit "$build_name" "$build_name"
 
     # Remove the container used to commit
-    docker rm $build_name
+    docker rm "$build_name"
 
     # Step two, do a development install
     docker run \
-        --name $build_name \
+        --name "$build_name" \
         -v "$build_script:/usr/local/bin/build.sh" \
         -v "$cache_dir:/root/.cache/yarn" \
         -v "$HOME/.npmrc:/root/.npmrc" \
-        $build_name build.sh --development
+        "$build_name" build.sh --development
 
     # Commit the development container
-    docker commit $build_name $build_name:dev
+    docker commit "$build_name" "$build_name:dev"
 
     # TODO: Better clean up
-    docker rm $build_name
+    docker rm "$build_name"
 }
 
 
 build_prod () {
     # Switch to our local source dir
-    cd /usr/local/src/app
+    cd /usr/local/src/app || exit 1
 
     # TODO: Make exclusion configurable
     local exclude
@@ -82,7 +314,7 @@ build_prod () {
         xargs -I{} cp --parents -v {} /usr/src/app/
 
     # Switch to our container source dir
-    cd /usr/src/app/
+    cd /usr/src/app/ || exit 1
 
     ls -lah  # TODO: Remove me
 
@@ -123,4 +355,4 @@ cmd () {
     esac
 }
 
-time cmd "$@"
+# time cmd "$@"
