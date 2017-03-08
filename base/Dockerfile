@@ -3,7 +3,8 @@ FROM debian:stable-slim
 ENV DEBIAN_FRONTEND=noninteractive \
     NPM_CONFIG_LOGLEVEL=info \
     NODE_VERSION=5.12.0 \
-    YARN_VERSION=0.21.3
+    YARN_VERSION=0.21.3 \
+    PATH=$PATH:./node_modules/.bin
 
 RUN \
     # Create node user \
@@ -11,7 +12,7 @@ RUN \
     && useradd --uid 1000 --gid node --shell /bin/bash --create-home node \
     # Install wget \
     && apt-get update -yqq \
-    && apt-get install -yqq wget \
+    && apt-get install -yqq wget bzip2 \
     && rm -rf /var/lib/apt/lists/* \
     # Install nodejs \
     && wget -q "https://nodejs.org/dist/v$NODE_VERSION/node-v$NODE_VERSION-linux-x64.tar.gz" \
