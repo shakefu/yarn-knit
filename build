@@ -9,6 +9,10 @@ KNIT_REPO=${KNIT_REPO:-shakefu}
 # Build the base image
 docker build -t "$KNIT_REPO/yarn-knit:base" -f base/Dockerfile base/
 
+# Build the cache image
+docker build -t "$KNIT_REPO/yarn-knit:cache" -f cache/Dockerfile cache/
+
 # Build the onbuild image
 docker build -t "$KNIT_REPO/yarn-knit:onbuild" -f onbuild/Dockerfile onbuild/
+
 

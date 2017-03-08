@@ -2,13 +2,29 @@
 
 ##################
 # Environment vars
+##################
 
-# Show debug output
-# TODO: Toggle to false
-KNIT_DEBUG=${KNIT_DEBUG:-true}
+# Toggle debug output
+if [[ -z ${KNIT_DEBUG+x} ]]; then
+    # TODO: Don't default debugging to true
+    KNIT_DEBUG=true
+fi
 
 # Docker Hub repo name
 KNIT_REPO=${KNIT_REPO:-shakefu}
+
+# Exclusion regex for copying source files
+KNIT_EXCLUDE=${KNIT_EXCLUDE:-'\/(node_modules|\.git)\/|^\.$'}
+
+# Prefix for output messages
+KNIT_PREFIX=${KNIT_PREFIX:-}
+
+# Yarn flags
+KNIT_YARN_FLAGS=${KNIT_YARN_FLAGS:-'--pure-lockfile --prefer-offline --no-progress'}
+
+#############
+# Global vars
+#############
 
 # Script information
 KNIT_SCRIPT=$(which knit)
@@ -34,7 +50,7 @@ _build () {
     KNIT_BUILD_NAME=$(basename "$KNIT_BUILD_DIR")
     KNIT_BUILD_NAME=${1:-$KNIT_BUILD_NAME}
 
-    info "Building $KNIT_BUILD_NAME ..."
+    info "Building $KNIT_BUILD_NAME"
 
     _setup
 
@@ -46,12 +62,30 @@ _build () {
 
     local cached_prod
     local cached_dev
-    cached_prod=$(docker images -q --filter=label="knit.base=$cache_sha" \
-        --filter=label="knit.build=production" \
-        --filter=label="knit.stage=installed")
-    cached_dev=$(docker images -q --filter=label="knit.base=$cache_sha" \
-        --filter=label="knit.build=development" \
-        --filter=label="knit.stage=installed")
+    cached_prod=$(docker images -q --filter=label="knit_base=$cache_sha" \
+        --filter=label="knit_build=production" \
+        --filter=label="knit_stage=installed")
+    cached_dev=$(docker images -q --filter=label="knit_base=$cache_sha" \
+        --filter=label="knit_build=development" \
+        --filter=label="knit_stage=installed")
+
+    # TODO: Check if multiple images were found, because that fucks shit up
+
+    if [[ -n "$cached_prod" ]]; then
+        if (( $(grep -c . <<< "$cached_prod") > 1 )); then
+            error "Multiple cached images found, please run 'docker image " \
+                "prune', or manually delete images."
+        fi
+        debug "Found cached production image: $cached_prod"
+    fi
+
+    if [[ -n "$cached_dev" ]]; then
+        if (( $(grep -c . <<< "$cached_dev") > 1 )); then
+            error "Multiple cached images found, please run 'docker image " \
+                "prune', or manually delete images."
+        fi
+        debug "Found cached development image: $cached_dev"
+    fi
 
     # If we have a cached image, then use that and just update the files
     if [[ -n "$cached_prod" && "$cached_dev" ]]; then
@@ -66,16 +100,99 @@ _build () {
 
     debug "Using yarn cache from $KNIT_CACHE_DIR"
 
+    local name
+    name=$(container_build)
+    info "Starting build container $name"
     docker run \
-        --name "$(build_container)" \
-        -v "$KNIT_SCRIPT:/usr/local/bin/knit" \
-        -v "$KNIT_CACHE_DIR:/root/.cache/yarn" \
-        -v "$KNIT_NPMRC:/root/.npmrc" \
+        --detach \
+        --name "$name" \
+        --volume "$(pwd):/usr/local/src/app" \
+        --volume "$KNIT_SCRIPT:/usr/local/bin/knit" \
+        --volume "$KNIT_CACHE_DIR:/root/.cache/yarn" \
+        --volume "$KNIT_NPMRC:/root/.npmrc" \
+        --env "KNIT_DEBUG=$KNIT_DEBUG" \
+        --env "KNIT_EXCLUDE=$KNIT_EXCLUDE" \
+        --env "KNIT_PREFIX=CONTAINER" \
+        --entrypoint "/bin/bash" \
         "$cache_image" knit wait
+
+    if [[ -n "$KNIT_DEBUG" ]]; then docker ps --filter="name=$name"; fi
+
+    info "Installing production dependencies"
+    docker exec -t "$name" knit install --production
+
+    # We have to override the CMD and ENTRYPOINT when we commit, because the
+    # commit otherwise will pick up the entrypoint and command from the running
+    # container (e.g. "/bin/bash" and "knit wait")
+
+    info "Committing install stage image"
+    local image
+    image=$(image_prod_install)
+    docker commit \
+        --change 'CMD ["start"]' \
+        --change "LABEL \
+            knit_base='$cache_sha' \
+            knit_build='production' \
+            knit_stage='installed'" \
+        --change 'ENTRYPOINT ["yarn", "run"]' \
+        "$name" "$image"
+
+    _update_files "$image"
+
+    info "Installing development dependencies"
+    docker exec -t "$name" knit install --development
+
+    info "Committing install stage image"
+    image=$(image_dev_install)
+    docker commit \
+        --change 'CMD ["start"]' \
+        --change "LABEL \
+            knit_base='$cache_sha' \
+            knit_build='development' \
+            knit_stage='installed'" \
+        --change 'ENTRYPOINT ["yarn", "run"]' \
+        "$name" "$image"
+
+    _update_files "$image"
 
     _cleanup
 
+    # For Josh
+    green "Done knitting."
+    echo
     exit 0
+}
+
+
+_install () {
+    local flags
+    flags="$*"
+
+    # shellcheck disable=SC2086
+    local yarn_cmd
+    yarn_cmd="yarn install $KNIT_YARN_FLAGS $flags"
+
+    info "Running $yarn_cmd"
+    $yarn_cmd
+}
+
+
+_copy () {
+    # Switch to our local source dir
+    cd /usr/local/src/app || error "Could not find source directory?!"
+
+    local copy_debug
+    if [[ -n "$KNIT_DEBUG" ]]; then copy_debug="-v"; fi
+
+    # Copy everything except node_modules /usr/src/app from /usr/local/src/app
+    info "Copying source files"
+    find . -type f | grep -vE "$KNIT_EXCLUDE" | \
+        xargs -I{} cp --parents $copy_debug {} /usr/src/app/
+
+    # Switch to our container source dir
+    cd /usr/src/app/ || error "Could not find app directory?!"
+
+    if [[ -n "$KNIT_DEBUG" ]]; then ls -lah; fi
 }
 
 
@@ -99,14 +216,70 @@ _setup () {
 }
 
 _update_files () {
-    local cached_sha=${1:-}
-    info "Updating files for $cached_sha"
+    local cache_image=${1:-}
+    info "Updating files for $cache_image"
+
+    local build
+    build=$(docker inspect -f "{{.Config.Labels.knit_build}}" "$cache_image")
+
+    if [[ -z "$build" ]]; then
+        error "Could not get build type from image"
+    fi
+
+    local name
+    local image
+
+    name="$(container_build)_$build"
+
+    if [[ "$build" == "production" ]]; then
+        image=$(image_prod)
+    elif [[ "$build" == "development" ]]; then
+        image=$(image_dev)
+    else
+        error "Unknown build type: $build"
+    fi
+
+    debug "Build environment: $build"
+    debug "Container name: $name"
+    debug "Target image: $image"
+
+    info "Starting update container"
+    docker run \
+        --detach \
+        --name "$name" \
+        --volume "$(pwd):/usr/local/src/app" \
+        --volume "$KNIT_SCRIPT:/usr/local/bin/knit" \
+        --env "KNIT_DEBUG=$KNIT_DEBUG" \
+        --env "KNIT_EXCLUDE=$KNIT_EXCLUDE" \
+        --env "KNIT_PREFIX=CONTAINER" \
+        --entrypoint "/bin/bash" \
+        "$cache_image" knit wait
+
+    info "Copying package files"
+    docker exec -t "$name" knit copy
+
+    info "Commiting assembly stage image"
+    docker commit \
+        --change "LABEL knit_stage='assembled'" \
+        "$name" "$image"
+
+    _rm "$name"
 }
 
 _cleanup () {
     debug "Cleaning up $KNIT_BASE"
     rm "$KNIT_CACHED"
     rmdir "$KNIT_BASE"
+
+    debug "Cleaing up build container"
+    _rm "$(container_build)"
+}
+
+_rm () {
+    local container
+    container=${1:-}
+    docker kill "$container" &>/dev/null || true
+    docker rm "$container" &>/dev/null || true
 }
 
 
@@ -116,7 +289,7 @@ _cleanup () {
 
 
 main () {
-    info "Knitting..."
+    info "Knitting ..."
 
     # Set our global script references
     KNIT_DIR=$(resolve_symlink "$0")
@@ -129,11 +302,20 @@ main () {
     case "$1" in
         wait)
             shift
+            info "Knit is waiting ..."
             sleep 10000
             ;;
         build)
             shift
             _build "$@"
+            ;;
+        install)
+            shift
+            _install "$@"
+            ;;
+        copy)
+            shift
+            _copy "$@"
             ;;
         *)
             _build "$@"
@@ -159,12 +341,28 @@ yarn_cache_dir () {
     echo "$dir"
 }
 
-build_container () {
+container_build () {
     echo "knit_$KNIT_BUILD_NAME"
 }
 
 image_base () {
     echo "$KNIT_BUILD_NAME:knit.base"
+}
+
+image_prod_install () {
+    echo "$KNIT_BUILD_NAME:knit.install.production"
+}
+
+image_dev_install () {
+    echo "$KNIT_BUILD_NAME:knit.install.development"
+}
+
+image_prod () {
+    echo "$KNIT_BUILD_NAME:knit.production"
+}
+
+image_dev () {
+    echo "$KNIT_BUILD_NAME:knit.development"
 }
 
 resolve_symlink () {
@@ -181,8 +379,8 @@ resolve_symlink () {
         script="${newscript:=$script}"
         # shellcheck disable=SC2012
         newscript=$(ls -l $script | awk '{ print $NF }')
-    done    
-    if [ ! "${script:0:1}" = '/' ]; then script=$PWD/$script; fi    
+    done
+    if [ ! "${script:0:1}" = '/' ]; then script=$PWD/$script; fi
 
     # shellcheck disable=SC2005
     echo "$(dirname "$script")"
@@ -192,13 +390,20 @@ resolve_symlink () {
 # Output functions
 ##################
 
+prefix () {
+    if [[ -z "$KNIT_PREFIX" ]]; then return; fi
+    grey "[$KNIT_PREFIX] "
+}
+
 info () {
+    prefix
     blue "[INFO] "
     echo "$*"
 }
 
 
 error () {
+    prefix
     red "[ERROR] "
     echo "$*"
     exit 1
@@ -207,6 +412,7 @@ error () {
 
 debug () {
     if [[ -z "$KNIT_DEBUG" ]]; then return; fi
+    prefix
     cyan "[DEBUG] "
     echo "$*"
 }
@@ -218,6 +424,7 @@ blue () { printf "\033[1;34m%s\033[0m" "$*"; }
 green () { printf "\033[1;32m%s\033[0m" "$*"; }
 drk_green () { printf "\033[0;32m%s\033[0m" "$*"; }
 cyan () { printf "\033[0;36m%s\033[0m" "$*"; }
+grey () { printf "\033[2;30m%s\033[0m" "$*"; }
 
 
 ################
