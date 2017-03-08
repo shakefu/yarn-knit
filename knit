@@ -22,6 +22,10 @@ KNIT_PREFIX=${KNIT_PREFIX:-}
 # Yarn flags
 KNIT_YARN_FLAGS=${KNIT_YARN_FLAGS:-'--pure-lockfile --prefer-offline --no-progress'}
 
+# Optional production-only build
+KNIT_PRODUCTION=${KNIT_PRODUCTION:-}
+
+
 #############
 # Global vars
 #############
@@ -132,12 +136,11 @@ _build () {
     local image
     image=$(image_prod_install)
     docker commit \
-        --change 'CMD ["start"]' \
+        --change 'CMD ["bash"]' \
         --change "LABEL \
             knit_base='$cache_sha' \
             knit_build='production' \
             knit_stage='installed'" \
-        --change 'ENTRYPOINT ["yarn", "run"]' \
         "$name" "$image"
 
     _update_files "$image"
@@ -148,12 +151,11 @@ _build () {
     info "Committing install stage image"
     image=$(image_dev_install)
     docker commit \
-        --change 'CMD ["start"]' \
+        --change 'CMD ["bash"]' \
         --change "LABEL \
             knit_base='$cache_sha' \
             knit_build='development' \
             knit_stage='installed'" \
-        --change 'ENTRYPOINT ["yarn", "run"]' \
         "$name" "$image"
 
     _update_files "$image"
@@ -201,6 +203,24 @@ _copy () {
     cd /usr/src/app/ || error "Could not find app directory?!"
 
     if [[ -n "$KNIT_DEBUG" ]]; then ls -lah; fi
+}
+
+
+_clean () {
+    KNIT_BUILD_NAME=$(basename "$KNIT_BUILD_DIR")
+    KNIT_BUILD_NAME=${1:-$KNIT_BUILD_NAME}
+
+    info "Cleaning all images for $KNIT_BUILD_NAME"
+
+    docker rmi "$(image_prod_install)" || true
+    docker rmi "$(image_dev_install)" || true
+    docker rmi "$(image_prod)" || true
+    docker rmi "$(image_dev)" || true
+    docker rmi "$(image_base)" || true
+    docker image prune -f || true
+
+    green "Done knitting."
+    echo
 }
 
 
@@ -268,7 +288,9 @@ _update_files () {
 
     info "Commiting assembly stage image"
     docker commit \
+        --change 'CMD ["start"]' \
         --change "LABEL knit_stage='assembled'" \
+        --change 'ENTRYPOINT ["yarn", "run"]' \
         "$name" "$image"
 
     _rm "$name"
@@ -303,7 +325,7 @@ _cleanup () {
     rm "$KNIT_CACHED" \
         "$KNIT_PROD" \
         "$KNIT_DEV" \
-        || true
+        2>/dev/null || true
     rmdir "$KNIT_BASE"
 
     debug "Cleaing up build container"
@@ -351,6 +373,10 @@ main () {
         copy)
             shift
             _copy "$@"
+            ;;
+        clean)
+            shift
+            _clean "$@"
             ;;
         *)
             _build "$@"
