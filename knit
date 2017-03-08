@@ -37,6 +37,8 @@ KNIT_BUILD_NAME=''
 KNIT_BASE=".knit"
 KNIT_DOCKERFILE="$KNIT_BASE/Dockerfile"
 KNIT_CACHED="$KNIT_DOCKERFILE-cached"
+KNIT_PROD="$KNIT_DOCKERFILE-prod"
+KNIT_DEV="$KNIT_DOCKERFILE-dev"
 KNIT_NPMRC="$HOME/.npmrc"
 
 
@@ -93,8 +95,9 @@ _build () {
         _update_files "$cached_prod"
         _update_files "$cached_dev"
 
-        # TODO: Post-update stuff
+        _post_install
 
+        _cleanup
         exit 0
     fi
 
@@ -154,6 +157,11 @@ _build () {
         "$name" "$image"
 
     _update_files "$image"
+
+    debug "Removing build container"
+    _rm "$name"
+
+    _post_install
 
     _cleanup
 
@@ -266,9 +274,36 @@ _update_files () {
     _rm "$name"
 }
 
+_post_install () {
+    debug "Post install"
+    if grep "FROM $KNIT_REPO/yarn-knit:onbuild" Dockerfile &>/dev/null; then
+        info "Found $KNIT_REPO/yarn-knit:onbuild Dockerfile"
+    else
+        debug "No matching Dockerfile found"
+        return
+    fi
+
+    debug "Setting up post install Dockerfiles"
+
+    # Create Production Dockerfile
+    echo "FROM $(image_prod)" > $KNIT_PROD
+    grep -v "^FROM" Dockerfile >> $KNIT_PROD
+
+    # Create Development Dockerfile
+    echo "FROM $(image_dev)" > $KNIT_DEV
+    grep -v "^FROM" Dockerfile >> $KNIT_DEV
+
+    info "Attempting to build post install images"
+    docker build -t "$(image_prod)" -f $KNIT_PROD . || true
+    docker build -t "$(image_dev)" -f $KNIT_DEV . || true
+}
+
 _cleanup () {
     debug "Cleaning up $KNIT_BASE"
-    rm "$KNIT_CACHED"
+    rm "$KNIT_CACHED" \
+        "$KNIT_PROD" \
+        "$KNIT_DEV" \
+        || true
     rmdir "$KNIT_BASE"
 
     debug "Cleaing up build container"
@@ -406,6 +441,7 @@ error () {
     prefix
     red "[ERROR] "
     echo "$*"
+    _cleanup
     exit 1
 }
 
