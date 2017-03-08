@@ -6,8 +6,7 @@
 
 # Toggle debug output
 if [[ -z ${KNIT_DEBUG+x} ]]; then
-    # TODO: Don't default debugging to true
-    KNIT_DEBUG=true
+    KNIT_DEBUG=
 fi
 
 # Docker Hub repo name
@@ -193,7 +192,6 @@ _install () {
     local flags
     flags="$*"
 
-    # shellcheck disable=SC2086
     local yarn_cmd
     yarn_cmd="yarn install $KNIT_YARN_FLAGS $flags"
 
@@ -211,9 +209,8 @@ _copy () {
 
     # Copy everything except node_modules /usr/src/app from /usr/local/src/app
     info "Copying source files"
-    find . \( -path ./node_modules -o -path ./.git \) -prune -o -type f | \
-        grep -vE "$KNIT_EXCLUDE" | \
-        xargs -I{} cp --parents $copy_debug {} /usr/src/app/
+    find . \( -path ./node_modules -o -path ./.git \) -prune -o -type f \
+        -exec cp --parents $copy_debug {} /usr/src/app/ \;
 
     # Switch to our container source dir
     cd /usr/src/app/ || error "Could not find app directory?!"
@@ -416,7 +413,7 @@ main () {
 
 yarn_cache_dir () {
     local dir
-    dir=$(yarn cache dir &>/dev/null || echo '/tmp/yarn')
+    dir=$(yarn cache dir 2>/dev/null || echo '/tmp/yarn')
 
     if [[ ! -d "$dir" ]]; then
         mkdir -p "$dir" || error "Could not create yarn cache directory"
