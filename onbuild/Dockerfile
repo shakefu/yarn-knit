@@ -5,4 +5,6 @@ ONBUILD COPY \
     yarn.lock \
     /usr/src/app/
 
+ONBUILD ENTRYPOINT ["yarn", "run"]
+ONBUILD CMD ["start"]
 
