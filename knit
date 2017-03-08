@@ -67,15 +67,16 @@ _build () {
     cache_sha=$(docker build -q -t "$cache_image" -f "$KNIT_CACHED" .)
 
     local cached_prod
+    if [[ -n "$KNIT_PRODUCTION" ]]; then
+        cached_prod=$(docker images -q --filter=label="knit_base=$cache_sha" \
+            --filter=label="knit_build=production" \
+            --filter=label="knit_stage=installed")
+    fi
+
     local cached_dev
-    cached_prod=$(docker images -q --filter=label="knit_base=$cache_sha" \
-        --filter=label="knit_build=production" \
-        --filter=label="knit_stage=installed")
     cached_dev=$(docker images -q --filter=label="knit_base=$cache_sha" \
         --filter=label="knit_build=development" \
         --filter=label="knit_stage=installed")
-
-    # TODO: Check if multiple images were found, because that fucks shit up
 
     if [[ -n "$cached_prod" ]]; then
         if (( $(grep -c . <<< "$cached_prod") > 1 )); then
@@ -94,13 +95,25 @@ _build () {
     fi
 
     # If we have a cached image, then use that and just update the files
-    if [[ -n "$cached_prod" && "$cached_dev" ]]; then
-        info "Updating images from cache"
+    if [[ -n "$cached_prod" ]]; then
+        info "Updating production image from cache"
         _update_files "$cached_prod"
+        _post_install production
+    fi
+
+    if [[ -n "$cached_dev" ]]; then
+        info "Updating development image from cache"
         _update_files "$cached_dev"
 
-        _post_install
+        _post_install development
+    fi
 
+    if [[ -n "$cached_prod" && -n "$cached_dev" ]]; then
+        # Updated both images, and done
+        _cleanup
+        exit 0
+    elif [[ -z "$KNIT_PRODUCTION" && -n "$cached_dev" ]]; then
+        # Only needed to update dev, hooray
         _cleanup
         exit 0
     fi
@@ -125,25 +138,28 @@ _build () {
 
     if [[ -n "$KNIT_DEBUG" ]]; then docker ps --filter="name=$name"; fi
 
-    info "Installing production dependencies"
-    docker exec -t "$name" knit install --production
-
     # We have to override the CMD and ENTRYPOINT when we commit, because the
     # commit otherwise will pick up the entrypoint and command from the running
     # container (e.g. "/bin/bash" and "knit wait")
 
-    info "Committing install stage image"
-    local image
-    image=$(image_prod_install)
-    docker commit \
-        --change 'CMD ["bash"]' \
-        --change "LABEL \
-            knit_base='$cache_sha' \
-            knit_build='production' \
-            knit_stage='installed'" \
-        "$name" "$image"
+    if [[ -n "$KNIT_PRODUCTION" ]]; then
+        info "Installing production dependencies"
+        docker exec -t "$name" knit install --production
 
-    _update_files "$image"
+        info "Committing install stage image"
+        local image
+        image=$(image_prod_install)
+        docker commit \
+            --change 'CMD ["bash"]' \
+            --change "LABEL \
+                knit_base='$cache_sha' \
+                knit_build='production' \
+                knit_stage='installed'" \
+            "$name" "$image"
+
+        _update_files "$image"
+        _post_install production
+    fi
 
     info "Installing development dependencies"
     docker exec -t "$name" knit install --development
@@ -159,11 +175,10 @@ _build () {
         "$name" "$image"
 
     _update_files "$image"
+    _post_install development
 
     debug "Removing build container"
     _rm "$name"
-
-    _post_install
 
     _cleanup
 
@@ -196,7 +211,8 @@ _copy () {
 
     # Copy everything except node_modules /usr/src/app from /usr/local/src/app
     info "Copying source files"
-    find . -type f | grep -vE "$KNIT_EXCLUDE" | \
+    find . \( -path ./node_modules -o -path ./.git \) -prune -o -type f | \
+        grep -vE "$KNIT_EXCLUDE" | \
         xargs -I{} cp --parents $copy_debug {} /usr/src/app/
 
     # Switch to our container source dir
@@ -210,13 +226,15 @@ _clean () {
     KNIT_BUILD_NAME=$(basename "$KNIT_BUILD_DIR")
     KNIT_BUILD_NAME=${1:-$KNIT_BUILD_NAME}
 
+    _cleanup
+
     info "Cleaning all images for $KNIT_BUILD_NAME"
 
-    docker rmi "$(image_prod_install)" || true
-    docker rmi "$(image_dev_install)" || true
-    docker rmi "$(image_prod)" || true
-    docker rmi "$(image_dev)" || true
-    docker rmi "$(image_base)" || true
+    docker rmi "$(image_prod_install)" 2>/dev/null || true
+    docker rmi "$(image_dev_install)" 2>/dev/null || true
+    docker rmi "$(image_prod)" 2>/dev/null || true
+    docker rmi "$(image_dev)" 2>/dev/null || true
+    docker rmi "$(image_base)" 2>/dev/null || true
     docker image prune -f || true
 
     green "Done knitting."
@@ -234,8 +252,8 @@ _setup () {
     mkdir -p "$KNIT_BASE"
 
     # TODO: Move this dockerfile somewhere better
-    debug "Copying yarn-knit Dockerfiles"
-    cp "$KNIT_DIR/Dockerfile" "$KNIT_CACHED"
+    debug "Creating yarn-knit:cache Dockerfiles"
+    echo "FROM $KNIT_REPO/yarn-knit:cache" > "$KNIT_CACHED"
 
     debug "Checking for .npmrc at $KNIT_NPMRC"
     if [[ ! -f "$KNIT_NPMRC" ]]; then
@@ -297,27 +315,32 @@ _update_files () {
 }
 
 _post_install () {
+    local build
+    build=${1:-}
+
     debug "Post install"
     if grep "FROM $KNIT_REPO/yarn-knit:onbuild" Dockerfile &>/dev/null; then
-        info "Found $KNIT_REPO/yarn-knit:onbuild Dockerfile"
+        debug "Found $KNIT_REPO/yarn-knit:onbuild Dockerfile"
     else
         debug "No matching Dockerfile found"
         return
     fi
 
-    debug "Setting up post install Dockerfiles"
+    info "Building post install images for $build"
 
-    # Create Production Dockerfile
-    echo "FROM $(image_prod)" > $KNIT_PROD
-    grep -v "^FROM" Dockerfile >> $KNIT_PROD
-
-    # Create Development Dockerfile
-    echo "FROM $(image_dev)" > $KNIT_DEV
-    grep -v "^FROM" Dockerfile >> $KNIT_DEV
-
-    info "Attempting to build post install images"
-    docker build -t "$(image_prod)" -f $KNIT_PROD . || true
-    docker build -t "$(image_dev)" -f $KNIT_DEV . || true
+    if [[ "$build" == "production" ]]; then
+        # Create Production Dockerfile
+        echo "FROM $(image_prod)" > $KNIT_PROD
+        grep -v "^FROM" Dockerfile >> $KNIT_PROD
+        docker build -t "$(image_prod)" -f $KNIT_PROD . || true
+    elif [[ "$build" == "development" ]]; then
+        # Create Development Dockerfile
+        echo "FROM $(image_dev)" > $KNIT_DEV
+        grep -v "^FROM" Dockerfile >> $KNIT_DEV
+        docker build -t "$(image_dev)" -f $KNIT_DEV . || true
+    else
+        error "Invalid build: $build"
+    fi
 }
 
 _cleanup () {
@@ -326,7 +349,7 @@ _cleanup () {
         "$KNIT_PROD" \
         "$KNIT_DEV" \
         2>/dev/null || true
-    rmdir "$KNIT_BASE"
+    rmdir "$KNIT_BASE" 2>/dev/null
 
     debug "Cleaing up build container"
     _rm "$(container_build)"
@@ -579,7 +602,8 @@ build_prod () {
     exclude='\/(node_modules|\.git)\/|^\.$'
 
     # Copy everything except node_modules /usr/src/app from /usr/local/src/app
-    find . -type f | grep -vE "$exclude" | \
+    find . \( -path ./node_modules -o -path ./.git \) -prune -o -type f | \
+        grep -vE "$exclude" | \
         xargs -I{} cp --parents -v {} /usr/src/app/
 
     # Switch to our container source dir
