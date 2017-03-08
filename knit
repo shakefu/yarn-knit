@@ -416,7 +416,7 @@ main () {
 
 yarn_cache_dir () {
     local dir
-    dir=$(yarn cache dir || echo '/tmp/yarn')
+    dir=$(yarn cache dir &>/dev/null || echo '/tmp/yarn')
 
     if [[ ! -d "$dir" ]]; then
         mkdir -p "$dir" || error "Could not create yarn cache directory"
