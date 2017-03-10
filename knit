@@ -141,7 +141,7 @@ _build () {
     # commit otherwise will pick up the entrypoint and command from the running
     # container (e.g. "/bin/bash" and "knit wait")
 
-    if [[ -n "$KNIT_PRODUCTION" ]]; then
+    if [[ -n "$KNIT_PRODUCTION" && -z "$cached_prod" ]]; then
         info "Installing production dependencies"
         docker exec -t "$name" knit install --production
 
@@ -160,21 +160,23 @@ _build () {
         _post_install production
     fi
 
-    info "Installing development dependencies"
-    docker exec -t "$name" knit install --development
+    if [[ -z "$cached_dev" ]]; then
+        info "Installing development dependencies"
+        docker exec -t "$name" knit install --development
 
-    info "Committing install stage image"
-    image=$(image_dev_install)
-    docker commit \
-        --change 'CMD ["bash"]' \
-        --change "LABEL \
-            knit_base='$cache_sha' \
-            knit_build='development' \
-            knit_stage='installed'" \
-        "$name" "$image"
+        info "Committing install stage image"
+        image=$(image_dev_install)
+        docker commit \
+            --change 'CMD ["bash"]' \
+            --change "LABEL \
+                knit_base='$cache_sha' \
+                knit_build='development' \
+                knit_stage='installed'" \
+            "$name" "$image"
 
-    _update_files "$image"
-    _post_install development
+        _update_files "$image"
+        _post_install development
+    fi
 
     debug "Removing build container"
     _rm "$name"
