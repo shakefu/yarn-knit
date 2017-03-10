@@ -266,6 +266,12 @@ _setup () {
     if [[ ! -f "./yarn.lock" ]]; then
         error "Cannot find yarn.lock"
     fi
+
+    debug "Checking yarn version"
+    # TODO: Make this smarter than a plain ascii check
+    if [[ "$(yarn --version)" < "0.19." ]]; then
+        error "Must have yarn --version greater than 0.19, please upgrade"
+    fi
 }
 
 _update_files () {
