@@ -256,6 +256,16 @@ _setup () {
     if [[ ! -f "$KNIT_NPMRC" ]]; then
         error "Cannot find .npmrc at $KNIT_NPMRC"
     fi
+
+    debug "Checking for package.json"
+    if [[ ! -f "./package.json" ]]; then
+        error "Cannot find package.json"
+    fi
+
+    debug "Checking for yarn.lock"
+    if [[ ! -f "./yarn.lock" ]]; then
+        error "Cannot find yarn.lock"
+    fi
 }
 
 _update_files () {
